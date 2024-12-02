@@ -22,10 +22,12 @@
         
         // 挂载终端对象到 id 为 "terminal" 的 div 元素
         term.open(document.querySelector('#terminal'));
-        
-        // 创建 WebSocket 连接
-        const socket = new WebSocket(`ws://${window.location.host}/webterminal`);
-        
+       // Determine the WebSocket protocol (ws or wss) based on the current page's protocol
+       const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+       const wsUrl = `${protocol}://${window.location.host}/webterminal`;
+
+        // Create a new WebSocket connection
+        const socket = new WebSocket(wsUrl);   
         // 网页 xterm 窗口中有输入的数据
         term.onData((data) => {
             socket.send(data); // 通过 WebSocket 发送给服务器
