@@ -58,27 +58,42 @@ func (s *Server) StartPTY() (*os.File, error) {
 	return pty.Start(c)
 }
 
-func (s *Server) HandleWebSocket(f *os.File) {
+func (s *Server) HandleWebSocket(conn *melody.Session) {
+	f, err := s.StartPTY()
+	if err != nil {
+		log.Printf("Error starting PTY: %v", err)
+		conn.CloseWithMsg([]byte("Failed to start terminal"))
+		return
+	}
+
 	// Goroutine to handle messages from PTY
 	go func() {
+		defer f.Close()
 		for {
 			buf := make([]byte, 1024)
 			read, err := f.Read(buf)
 			if err != nil {
-				log.Println("Error reading from pty:", err)
+				log.Printf("Error reading from PTY: %v", err)
 				return
 			}
-			if err := s.Melody.Broadcast(buf[:read]); err != nil {
-				log.Println("Error broadcasting message:", err)
+			if err := conn.Write(buf[:read]); err != nil {
+				log.Printf("Error writing to WebSocket: %v", err)
+				return
 			}
 		}
 	}()
 
 	// Handle messages from WebSocket
-	s.Melody.HandleMessage(func(session *melody.Session, msg []byte) {
+	s.Melody.HandleMessage(func(conn *melody.Session, msg []byte) {
 		if _, err := f.Write(msg); err != nil {
-			log.Println("Error writing to pty:", err)
+			log.Printf("Error writing to PTY: %v", err)
 		}
+	})
+
+	// On Close cleanup
+	s.Melody.HandleClose(func(conn *melody.Session, i int, s2 string) error {
+		f.Close()
+		return nil
 	})
 }
 
@@ -149,47 +164,51 @@ func (s *Server) basicAuth(w http.ResponseWriter, r *http.Request) bool {
 	return len(pair) == 2 && pair[0] == expectedUsername && pair[1] == expectedPassword
 }
 
-func main() {
+var (
 	// Define command line flags using Cobra
-	var addr string
-	var enableAuth bool
-	var authUsername string
-	var authPassword string
-	var shell string
+	addr         string
+	enableAuth   bool
+	authUsername string
+	authPassword string
+	shell        string
+)
 
-	var rootCmd = &cobra.Command{
-		Use:   "webterminal",
-		Short: "WebTerminal is a web-based terminal application.",
-		Run: func(cmd *cobra.Command, args []string) {
-			// Create server instance
-			server := NewServer(addr, shell, enableAuth, authUsername, authPassword)
+var rootCmd = &cobra.Command{
+	Use:   "webterminal",
+	Short: "WebTerminal is a web-based terminal application.",
+	Run:   RunServer,
+}
 
-			// Start PTY
-			f, err := server.StartPTY()
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			// Handle WebSocket
-			server.HandleWebSocket(f)
-
-			// Start server
-			log.Println("Listening on", server.Addr)
-			if err := http.ListenAndServe(server.Addr, server); err != nil {
-				log.Fatal(err)
-			}
-		},
-	}
+func init() {
 
 	// Define flags
 	rootCmd.Flags().StringVar(&addr, "addr", "0.0.0.0:8089", "Server address")
-	rootCmd.Flags().BoolVar(&enableAuth, "auth", true, "Enable authentication (default: true)")
+	rootCmd.Flags().BoolVar(&enableAuth, "auth", false, "Enable authentication (default: false)")
 	rootCmd.Flags().StringVar(&authUsername, "username", "admin", "Authentication username")
 	rootCmd.Flags().StringVar(&authPassword, "password", "password", "Authentication password")
 	rootCmd.Flags().StringVar(&shell, "shell", "sh", "Shell to use (default: sh)")
+}
+
+func main() {
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
+	}
+}
+
+func RunServer(cmd *cobra.Command, args []string) {
+	// Create server instance
+	server := NewServer(addr, shell, enableAuth, authUsername, authPassword)
+
+	// Handle new WebSocket connections
+	server.Melody.HandleConnect(func(s *melody.Session) {
+		server.HandleWebSocket(s)
+	})
+
+	// Start server
+	log.Println("Listening on", server.Addr)
+	if err := http.ListenAndServe(server.Addr, server); err != nil {
+		log.Fatal(err)
 	}
 }
