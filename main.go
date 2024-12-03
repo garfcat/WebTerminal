@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/creack/pty"
@@ -32,6 +33,7 @@ type Server struct {
 	AuthUsername string
 	AuthPassword string
 	Sessions     map[string]time.Time
+	Lock         sync.Mutex
 }
 
 func NewServer(addr, shell string, enableAuth bool, authUsername, authPassword string) *Server {
@@ -50,6 +52,7 @@ func NewServer(addr, shell string, enableAuth bool, authUsername, authPassword s
 		AuthUsername: authUsername,
 		AuthPassword: authPassword,
 		Sessions:     make(map[string]time.Time),
+		Lock:         sync.Mutex{},
 	}
 }
 
@@ -114,6 +117,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) checkSession(w http.ResponseWriter, r *http.Request) bool {
+	s.Lock.Lock()
+	defer s.Lock.Unlock()
 	cookie, err := r.Cookie("session_id")
 	if err == nil {
 		sessionID := cookie.Value
