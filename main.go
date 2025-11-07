@@ -47,7 +47,7 @@ func NewServer(addr, shell string, enableAuth bool, authUsername, authPassword s
 		Addr:         addr,
 		Shell:        shell,
 		Melody:       m,
-		FileSystem:   http.StripPrefix("/", fs),
+		FileSystem:   http.StripPrefix("/xterm/", fs),
 		EnableAuth:   enableAuth,
 		AuthUsername: authUsername,
 		AuthPassword: authPassword,
@@ -109,7 +109,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Route handling
-	if r.URL.Path == "/webterminal" {
+	// Normalize access without trailing slash to /xterm/
+	if r.URL.Path == "/xterm" {
+		http.Redirect(w, r, "/xterm/", http.StatusMovedPermanently)
+		return
+	}
+
+	// Redirect root to /xterm/
+	if r.URL.Path == "/" {
+		http.Redirect(w, r, "/xterm/", http.StatusMovedPermanently)
+		return
+	}
+
+	if r.URL.Path == "/xterm/webterminal" {
 		s.Melody.HandleRequest(w, r)
 	} else {
 		s.FileSystem.ServeHTTP(w, r)
@@ -144,6 +156,7 @@ func (s *Server) checkSession(w http.ResponseWriter, r *http.Request) bool {
 		Name:    "session_id",
 		Value:   sessionID,
 		Expires: expiry,
+		Path:    "/xterm",
 	})
 
 	return true

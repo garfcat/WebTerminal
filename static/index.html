@@ -24,7 +24,7 @@
         term.open(document.querySelector('#terminal'));
        // Determine the WebSocket protocol (ws or wss) based on the current page's protocol
        const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-       const wsUrl = `${protocol}://${window.location.host}/webterminal`;
+       const wsUrl = `${protocol}://${window.location.host}/xterm/webterminal`;
 
         // Create a new WebSocket connection
         const socket = new WebSocket(wsUrl);   

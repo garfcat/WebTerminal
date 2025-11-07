@@ -1,0 +1,41 @@
+# Go build artifacts
+bin/
+build/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Project binary
+WebTerminal
+
+# Logs & coverage
+*.log
+coverage.*
+*.coverprofile
+*.lcov
+
+# Environment files
+.env
+.env.*
+
+# Editors/OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Frontend (static)
+static/node_modules/
+static/.cache/
+static/.vite/
+static/dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
