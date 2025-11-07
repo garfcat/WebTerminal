@@ -27,7 +27,15 @@
        const wsUrl = `${protocol}://${window.location.host}/xterm/webterminal`;
 
         // Create a new WebSocket connection
-        const socket = new WebSocket(wsUrl);   
+        const socket = new WebSocket(wsUrl);
+
+        // 发送终端尺寸给服务端
+        function sendResize() {
+            if (socket.readyState === WebSocket.OPEN) {
+                const payload = JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows });
+                socket.send(payload);
+            }
+        }
         // 网页 xterm 窗口中有输入的数据
         term.onData((data) => {
             socket.send(data); // 通过 WebSocket 发送给服务器
@@ -41,12 +49,19 @@
         // 函数：调整终端大小
         function fitTerminal() {
             fitAddon.fit();
+            // 将新的行列数同步给服务端
+            sendResize();
         }
         
         // 初始调整终端大小
         fitTerminal();
+
+        // WebSocket 打开后同步一次尺寸，确保后端 PTY 与前端一致
+        socket.addEventListener('open', () => {
+            sendResize();
+        });
         
-        // 监听窗口大小变化事件，调整终端大小
+        // 监听窗口大小变化事件，调整终端大小并同步后端 PTY 尺寸
         window.addEventListener('resize', fitTerminal);
     </script>
 </body>

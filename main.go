@@ -3,10 +3,12 @@ package main
 import (
 	"embed"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -25,18 +27,21 @@ import (
 var content embed.FS
 
 type Server struct {
-	Addr         string
-	Shell        string
-	Melody       *melody.Melody
-	FileSystem   http.Handler
-	EnableAuth   bool
-	AuthUsername string
-	AuthPassword string
-	Sessions     map[string]time.Time
-	Lock         sync.Mutex
+	Addr           string
+	Shell          string
+	Melody         *melody.Melody
+	FileSystem     http.Handler
+	EnableAuth     bool
+	AuthUsername   string
+	AuthPassword   string
+	Sessions       map[string]time.Time
+	Lock           sync.Mutex
+	AllowedOrigins []string
+	FailedAuth     map[string]int
+	BlockedUntil   map[string]time.Time
 }
 
-func NewServer(addr, shell string, enableAuth bool, authUsername, authPassword string) *Server {
+func NewServer(addr, shell string, enableAuth bool, authUsername, authPassword string, allowedOrigins []string) *Server {
 	m := melody.New()
 
 	// Serve static files from the embedded filesystem
@@ -44,15 +49,18 @@ func NewServer(addr, shell string, enableAuth bool, authUsername, authPassword s
 	fs := http.FileServer(http.FS(staticFiles))
 
 	return &Server{
-		Addr:         addr,
-		Shell:        shell,
-		Melody:       m,
-		FileSystem:   http.StripPrefix("/xterm/", fs),
-		EnableAuth:   enableAuth,
-		AuthUsername: authUsername,
-		AuthPassword: authPassword,
-		Sessions:     make(map[string]time.Time),
-		Lock:         sync.Mutex{},
+		Addr:           addr,
+		Shell:          shell,
+		Melody:         m,
+		FileSystem:     http.StripPrefix("/xterm/", fs),
+		EnableAuth:     enableAuth,
+		AuthUsername:   authUsername,
+		AuthPassword:   authPassword,
+		Sessions:       make(map[string]time.Time),
+		Lock:           sync.Mutex{},
+		AllowedOrigins: allowedOrigins,
+		FailedAuth:     make(map[string]int),
+		BlockedUntil:   make(map[string]time.Time),
 	}
 }
 
@@ -68,6 +76,9 @@ func (s *Server) HandleWebSocket(conn *melody.Session) {
 		conn.CloseWithMsg([]byte("Failed to start terminal"))
 		return
 	}
+
+	// 将该连接对应的 PTY 句柄存入 session 上下文
+	conn.Set("pty", f)
 
 	// Goroutine to handle messages from PTY
 	go func() {
@@ -85,17 +96,47 @@ func (s *Server) HandleWebSocket(conn *melody.Session) {
 			}
 		}
 	}()
+}
 
-	// Handle messages from WebSocket
+// RegisterMessageHandlers registers global handlers for message and close events once.
+func (s *Server) RegisterMessageHandlers() {
+	// 消息处理：根据连接上下文找到对应 PTY
 	s.Melody.HandleMessage(func(conn *melody.Session, msg []byte) {
+		obj, ok := conn.Get("pty")
+		if !ok || obj == nil {
+			return
+		}
+		f, ok := obj.(*os.File)
+		if !ok || f == nil {
+			return
+		}
+
+		// 支持 resize 指令
+		var m struct {
+			Type string `json:"type"`
+			Cols int    `json:"cols"`
+			Rows int    `json:"rows"`
+		}
+		if err := json.Unmarshal(msg, &m); err == nil && m.Type == "resize" && m.Cols > 0 && m.Rows > 0 {
+			if err := pty.Setsize(f, &pty.Winsize{Cols: uint16(m.Cols), Rows: uint16(m.Rows)}); err != nil {
+				log.Printf("Error resizing PTY: %v", err)
+			}
+			return
+		}
+
 		if _, err := f.Write(msg); err != nil {
 			log.Printf("Error writing to PTY: %v", err)
 		}
 	})
 
-	// On Close cleanup
+	// 关闭处理：关闭该连接的 PTY
 	s.Melody.HandleClose(func(conn *melody.Session, i int, s2 string) error {
-		f.Close()
+		obj, ok := conn.Get("pty")
+		if ok && obj != nil {
+			if f, ok2 := obj.(*os.File); ok2 && f != nil {
+				f.Close()
+			}
+		}
 		return nil
 	})
 }
@@ -143,20 +184,43 @@ func (s *Server) checkSession(w http.ResponseWriter, r *http.Request) bool {
 		}
 	}
 
-	// Perform basic auth
+	// Rate limit: block if IP is currently blocked
+	ip := clientIP(r)
+	if until, ok := s.BlockedUntil[ip]; ok {
+		if time.Now().Before(until) {
+			w.Header().Set("Retry-After", fmt.Sprintf("%d", int(time.Until(until).Seconds())))
+			return false
+		}
+	}
+
+	// Perform basic auth; count only when Authorization header is present but invalid
+	authHeader := r.Header.Get("Authorization")
 	if !s.basicAuth(w, r) {
+		if authHeader != "" {
+			s.FailedAuth[ip]++
+			if s.FailedAuth[ip] >= 5 {
+				s.BlockedUntil[ip] = time.Now().Add(5 * time.Minute)
+			}
+		}
 		return false
 	}
+
+	// Reset counters on success
+	delete(s.FailedAuth, ip)
+	delete(s.BlockedUntil, ip)
 
 	// Create a new session
 	sessionID := uuid.New().String()
 	expiry := time.Now().Add(time.Minute * 30)
 	s.Sessions[sessionID] = expiry
 	http.SetCookie(w, &http.Cookie{
-		Name:    "session_id",
-		Value:   sessionID,
-		Expires: expiry,
-		Path:    "/xterm",
+		Name:     "session_id",
+		Value:    sessionID,
+		Expires:  expiry,
+		Path:     "/xterm",
+		HttpOnly: true,
+		Secure:   isSecureRequest(r),
+		SameSite: http.SameSiteStrictMode,
 	})
 
 	return true
@@ -184,11 +248,12 @@ func (s *Server) basicAuth(w http.ResponseWriter, r *http.Request) bool {
 
 var (
 	// Define command line flags using Cobra
-	addr         string
-	enableAuth   bool
-	authUsername string
-	authPassword string
-	shell        string
+	addr           string
+	enableAuth     bool
+	authUsername   string
+	authPassword   string
+	shell          string
+	allowedOrigins []string
 )
 
 var rootCmd = &cobra.Command{
@@ -205,6 +270,7 @@ func init() {
 	rootCmd.Flags().StringVar(&authUsername, "username", "admin", "Authentication username")
 	rootCmd.Flags().StringVar(&authPassword, "password", "password", "Authentication password")
 	rootCmd.Flags().StringVar(&shell, "shell", "sh", "Shell to use (default: sh)")
+	rootCmd.Flags().StringSliceVar(&allowedOrigins, "allowed-origins", []string{}, "Comma-separated list of allowed Origin values for WebSocket; empty = same-origin only")
 }
 
 func main() {
@@ -217,16 +283,63 @@ func main() {
 
 func RunServer(cmd *cobra.Command, args []string) {
 	// Create server instance
-	server := NewServer(addr, shell, enableAuth, authUsername, authPassword)
+	server := NewServer(addr, shell, enableAuth, authUsername, authPassword, allowedOrigins)
 
 	// Handle new WebSocket connections
 	server.Melody.HandleConnect(func(s *melody.Session) {
 		server.HandleWebSocket(s)
 	})
+	// Register global handlers (message/close) once
+	server.RegisterMessageHandlers()
+
+	// Strict Origin check for WebSocket upgrades
+	server.Melody.Upgrader.CheckOrigin = func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return false
+		}
+		if len(server.AllowedOrigins) == 0 {
+			u, err := url.Parse(origin)
+			if err != nil {
+				return false
+			}
+			return strings.EqualFold(u.Host, r.Host)
+		}
+		for _, o := range server.AllowedOrigins {
+			if strings.EqualFold(o, origin) {
+				return true
+			}
+		}
+		return false
+	}
 
 	// Start server
 	log.Println("Listening on", server.Addr)
 	if err := http.ListenAndServe(server.Addr, server); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// isSecureRequest best-effort detection for TLS or proxy-forwarded TLS
+func isSecureRequest(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if proto := r.Header.Get("X-Forwarded-Proto"); strings.EqualFold(proto, "https") {
+		return true
+	}
+	return false
+}
+
+func clientIP(r *http.Request) string {
+	if xf := r.Header.Get("X-Forwarded-For"); xf != "" {
+		// take first IP
+		parts := strings.Split(xf, ",")
+		return strings.TrimSpace(parts[0])
+	}
+	host := r.RemoteAddr
+	if i := strings.LastIndex(host, ":"); i != -1 {
+		return host[:i]
+	}
+	return host
 }
