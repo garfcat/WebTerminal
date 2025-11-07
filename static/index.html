@@ -28,6 +28,7 @@
 
         // Create a new WebSocket connection
         const socket = new WebSocket(wsUrl);
+        socket.binaryType = 'arraybuffer';
 
         // 发送终端尺寸给服务端
         function sendResize() {
@@ -42,9 +43,23 @@
         });
         
         // 收到来自服务器的 WebSocket 消息
+        // 使用流式解码，避免多字节 UTF-8 被分帧切开导致的 "\uFFFD" 乱码
+        const utf8Decoder = new TextDecoder('utf-8', { fatal: false });
         socket.onmessage = (event) => {
-            term.write(event.data); // 向 xterm 对象写入数据
+            let text;
+            if (event.data instanceof ArrayBuffer) {
+                text = utf8Decoder.decode(new Uint8Array(event.data), { stream: true });
+            } else {
+                text = event.data;
+            }
+            term.write(text);
         };
+
+        // 连接关闭时 flush 解码器缓冲，输出任何未完成的多字节序列
+        socket.addEventListener('close', () => {
+            const remaining = utf8Decoder.decode();
+            if (remaining) term.write(remaining);
+        });
         
         // 函数：调整终端大小
         function fitTerminal() {

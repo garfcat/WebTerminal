@@ -66,7 +66,34 @@ func NewServer(addr, shell string, enableAuth bool, authUsername, authPassword s
 
 func (s *Server) StartPTY() (*os.File, error) {
 	c := exec.Command(s.Shell)
+	// 确保 UTF-8 与合适的终端类型，减少编码/宽字符问题
+	// 在未显式设置时追加，保持已有环境优先
+	env := os.Environ()
+	if !hasEnvKey(env, "LANG") {
+		env = append(env, "LANG=en_US.UTF-8")
+	}
+	if !hasEnvKey(env, "LC_ALL") {
+		env = append(env, "LC_ALL=en_US.UTF-8")
+	}
+	if !hasEnvKey(env, "LC_CTYPE") {
+		env = append(env, "LC_CTYPE=en_US.UTF-8")
+	}
+	if !hasEnvKey(env, "TERM") {
+		env = append(env, "TERM=xterm-256color")
+	}
+	c.Env = env
 	return pty.Start(c)
+}
+
+// hasEnvKey 判断形如 KEY=VALUE 的切片中是否存在指定 KEY（忽略大小写）
+func hasEnvKey(env []string, key string) bool {
+	prefix := strings.ToLower(key) + "="
+	for _, e := range env {
+		if strings.HasPrefix(strings.ToLower(e), prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) HandleWebSocket(conn *melody.Session) {
@@ -90,7 +117,7 @@ func (s *Server) HandleWebSocket(conn *melody.Session) {
 				log.Printf("Error reading from PTY: %v", err)
 				return
 			}
-			if err := conn.Write(buf[:read]); err != nil {
+			if err := conn.WriteBinary(buf[:read]); err != nil {
 				log.Printf("Error writing to WebSocket: %v", err)
 				return
 			}
